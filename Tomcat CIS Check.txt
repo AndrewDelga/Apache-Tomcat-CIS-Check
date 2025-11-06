@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# Apache Tomcat CIS Compliance Checker (Launcher Only)
+# Detects Tomcat installations, identifies the version, and executes the correct CIS audit script.
+# Does not enforce changes. Only the selected function script handles report generation.
+
+TOMCAT_DIRS=(
+    "/opt/keeper/share/guacamole/tomcat"
+    "/opt/atlassian/confluence"
+    "/opt/jfrog/artifactory/app/artifactory/tomcat"
+    "/opt/apache-tomcat-*"
+    "/opt/coverity/server/home"
+    "/opt/atlassian/jira"
+    "/opt/xifinportal"
+    "/opt/accession"
+    "/opt/biplusportal"
+    "/opt/leoxportal"
+    "/opt/casportal"
+    "/opt/adminws"
+    "/opt/claimstatus"
+    "/opt/client"
+    "/opt/docstore"
+    "/opt/electronicpayment"
+    "/opt/electronicpaymentposting"
+    "/opt/eligibility"
+    "/opt/eligibilityinternal"
+    "/opt/filemaintenance"
+    "/opt/imageservice"
+    "/opt/messagews"
+    "/opt/patient"
+    "/opt/payment"
+    "/opt/payor"
+    "/opt/tomcat*"
+    "/opt/clientportal"
+    "/opt/eomportal"
+    "/opt/patientportal"
+    "/opt/peportal"
+    "/opt/ssoportal"
+    "/opt/docstore"
+)
+
+get_tomcat_version() {
+    local dir="$1"
+    local jar
+    jar=$(timeout 5s find "$dir" -name catalina.jar 2>/dev/null | head -n1)
+    if [[ -f "$jar" ]]; then
+        timeout 5s unzip -p "$jar" META-INF/MANIFEST.MF 2>/dev/null | grep "Implementation-Version" | awk '{print $2}' | cut -d'-' -f1
+    else
+        echo ""
+    fi
+}
+
+push_report_to_github() {
+    local report_file="$1"
+    local tomcat_dir="$2"
+    local github_token="${GITHUB_TOKEN:?Error: GITHUB_TOKEN not set}"
+    local repo="USERNAME/REPORT_REPO"
+    local branch="main"
+
+    local base_name=$(basename "$report_file")
+    local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
+    local new_report_name="${base_name%.txt}_$(basename "$tomcat_dir")_$timestamp.txt"
+
+    local api_url="https://api.github.com/repos/$repo/contents/$new_report_name"
+
+    # Base64 encode file contents
+    local file_content
+    file_content=$(base64 -w 0 "$report_file")
+
+    # Create commit message and payload
+    read -r -d '' payload <<EOF
+{
+  "message": "Add report for $(basename "$tomcat_dir") at $timestamp",
+  "content": "$file_content",
+  "branch": "$branch"
+}
+EOF
+
+    echo "📤 Uploading $new_report_name to GitHub via API..."
+    response=$(curl -s -X PUT \
+      -H "Authorization: token $github_token" \
+      -H "Content-Type: application/json" \
+      -d "$payload" \
+      "$api_url")
+
+    if echo "$response" | grep -q '"content"'; then
+        echo "✅ Successfully uploaded $new_report_name"
+        rm -f "$report_file" && echo "🧹 Local report deleted: $report_file"
+    else
+        echo "❌ Failed to upload to GitHub"
+        echo "$response"
+    fi
+}
+
+
+launch_cis_check() {
+    local dir="$1"
+    local major="$2"
+    local report_path=""
+
+    case "$major" in
+      7)
+        source <(curl -sSL https://raw.githubusercontent.com/USERNAME/Tomcat-CIS-Check/main/functions_v7.sh)
+        # After sourcing the functions file:
+		export -f check_controls_v7
+        
+		# Run with timeout in bash -c, capture full output
+		output=$(timeout 600s bash -c "check_controls_v7 '$dir'")
+        
+		# Extract last line as report path (after removing carriage returns)
+		report_path=$(echo "$output" | tr -d '\r' | tail -n1)
+        ;;
+      8)
+      	source <(curl -sSL https://raw.githubusercontent.com/USERNAME/Tomcat-CIS-Check/main/functions_v8.sh)
+      	# After sourcing the functions file:
+		export -f check_controls_v8
+        
+		# Run with timeout in bash -c, capture full output
+		output=$(timeout 600s bash -c "check_controls_v8 '$dir'")
+        
+		# Extract last line as report path (after removing carriage returns)
+		report_path=$(echo "$output" | tr -d '\r' | tail -n1)
+        ;;
+      9)
+      	source <(curl -sSL https://raw.githubusercontent.com/USERNAME/Tomcat-CIS-Check/main/functions_v9.sh)
+      	# After sourcing the functions file:
+		export -f check_controls_v9
+        
+		# Run with timeout in bash -c, capture full output
+		output=$(timeout 600s bash -c "check_controls_v9 '$dir'")
+        
+		# Extract last line as report path (after removing carriage returns)
+		report_path=$(echo "$output" | tr -d '\r' | tail -n1)
+        ;;
+      10)
+        source <(curl -sSL https://raw.githubusercontent.com/USERNAME/Tomcat-CIS-Check/main/functions_v10.sh)
+    	export -f check_controls_v10
+
+    	# Run with timeout, capture output AND print live to terminal
+    	output=$(timeout 60s bash -c "check_controls_v10 '$dir'")
+
+    	report_path=$(echo "$output" | tr -d '\r' | tail -n1)
+        ;;
+      11)
+        source <(curl -sSL https://raw.githubusercontent.com/USERNAME/Tomcat-CIS-Check/main/functions_v11.sh)
+        # After sourcing the functions file:
+		export -f check_controls_v11
+        
+		# Run with timeout in bash -c, capture full output
+		output=$(timeout 600s bash -c "check_controls_v11 '$dir'")
+        
+		# Extract last line as report path (after removing carriage returns)
+		report_path=$(echo "$output" | tr -d '\r' | tail -n1)
+        ;;
+      *)
+        echo "⚠️ Unsupported Tomcat version: $major"
+        return
+        ;;
+    esac
+
+    if [[ -f "$report_path" ]]; then
+        echo "📄 Report generated at: $report_path"
+        echo "Pushing report to GitHub..."
+        push_report_to_github "$report_path" "$dir"
+    else
+        echo "❌ No report found at $report_path"
+    fi
+}
+
+# Search and scan for Tomcat instances
+for base_path in "${TOMCAT_DIRS[@]}"; do
+    for dir in $(ls -d $base_path 2>/dev/null); do
+        if [[ -d "$dir" && -f "$dir/conf/server.xml" ]]; then
+            echo -e "\n📦 Found Tomcat at: $dir"
+            version=$(get_tomcat_version "$dir")
+            if [[ -n "$version" ]]; then
+                major=$(echo "$version" | cut -d'.' -f1)
+                echo "🔍 Detected version: $version (major: $major)"
+                launch_cis_check "$dir" "$major"
+            else
+                echo "⚠️ Could not determine version for: $dir"
+            fi
+        fi
+    done
+done
